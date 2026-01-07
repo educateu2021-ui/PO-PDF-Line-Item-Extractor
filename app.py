@@ -1,70 +1,65 @@
 import streamlit as st
 import pandas as pd
-import pdfplumber
+import numpy as np
+from pdf2image import convert_from_bytes
+import pytesseract
 import io
+import re
 
-st.set_page_config(page_title="Stellantis PO Extractor", layout="wide")
-st.title("📄 Stellantis PO Extractor")
+st.set_page_config(page_title="Stellantis PO OCR Extractor", layout="wide")
+st.title("👁️ PO OCR Image Extractor")
+st.write("This version converts PDFs to images to 'read' hard-to-parse documents.")
 
-uploaded_files = st.file_uploader("Upload Stellantis PO PDFs", type="pdf", accept_multiple_files=True)
+uploaded_file = st.file_uploader("Upload Stellantis PO PDF", type="pdf")
 
-def extract_stellantis_logic(pdf_file):
-    extracted_items = []
-    with pdfplumber.open(pdf_file) as pdf:
-        for page in pdf.pages:
-            # Force table extraction using visual lines
-            table = page.extract_table({
-                "vertical_strategy": "lines",
-                "horizontal_strategy": "lines",
-                "snap_tolerance": 3,
-            })
-            
-            if not table:
-                # Fallback: Try extracting without strict lines (for borderless tables)
-                table = page.extract_table()
-
-            if table:
-                for row in table:
-                    # Filter for rows that look like Line Items (contain 'USD' or 'LO')
-                    # This matches Item 1 and Item 2 in your document [cite: 7, 49]
-                    if any("USD" in str(cell) for cell in row) and any("LO" in str(cell) for cell in row):
-                        # Clean up the row data
-                        clean_row = [str(c).replace('\n', ' ').strip() if c else "" for c in row]
-                        
-                        # Mapping based on your document's columns [cite: 7, 49]
-                        extracted_items.append({
-                            "Source File": pdf_file.name,
-                            "Item": clean_row[0],
-                            "Material": clean_row[1],
-                            "Quantity": clean_row[2],
-                            "UOM": clean_row[3],
-                            "Unit Price / Currency": clean_row[4],
-                            "Effective Value": clean_row[5],
-                            "Net Amount": clean_row[6]
-                        })
-    return extracted_items
-
-if uploaded_files:
-    final_data = []
-    for file in uploaded_files:
-        data = extract_stellantis_logic(file)
-        final_data.extend(data)
+def perform_ocr_extraction(pdf_bytes):
+    # Convert PDF pages to images
+    images = convert_from_bytes(pdf_bytes)
+    all_extracted_text = ""
     
-    if final_data:
-        df = pd.DataFrame(final_data)
-        st.success(f"Extracted {len(df)} items!")
-        st.dataframe(df)
+    for i, image in enumerate(images):
+        # Perform OCR on each page
+        page_text = pytesseract.image_to_string(image)
+        all_extracted_text += f"\n--- Page {i+1} ---\n" + page_text
+    
+    return all_extracted_text
 
-        # Download to Excel
+def parse_text_to_table(text):
+    # Regex designed for Item 1 and Item 2 in your document 
+    # Looks for: [Item #] [Description] [Quantity] [UOM] [Price]
+    pattern = r"(\d+)\s+([\w\s/]+)\s+([\d,.]+)\s+(LO)\s+([\d,.]+)"
+    matches = re.findall(pattern, text)
+    
+    results = []
+    for m in matches:
+        results.append({
+            "Item": m[0],
+            "Material": m[1].strip(),
+            "Quantity": m[2],
+            "UOM": m[3],
+            "Unit Price": m[4],
+            "Net Amount": m[4]
+        })
+    return results
+
+if uploaded_file:
+    with st.spinner("Converting PDF to Image and running OCR..."):
+        pdf_bytes = uploaded_file.read()
+        raw_text = perform_ocr_extraction(pdf_bytes)
+        items = parse_text_to_table(raw_text)
+        
+    if items:
+        df = pd.DataFrame(items)
+        st.success("Data Extracted Successfully!")
+        st.dataframe(df, use_container_width=True)
+        
+        # Download Logic
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='PO_Data')
+            df.to_excel(writer, index=False)
         
-        st.download_button(
-            label="📥 Download Excel",
-            data=output.getvalue(),
-            file_name="Stellantis_PO_Export.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📥 Download Excel", output.getvalue(), "PO_OCR_Data.xlsx")
     else:
-        st.error("Still no data found. The PDF might be a scanned image. Would you like to try OCR mode?")
+        st.error("Could not find line items in the image text.")
+        with st.expander("Show Raw OCR Text"):
+            st.text(raw_text)
