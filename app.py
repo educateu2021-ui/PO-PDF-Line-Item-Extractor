@@ -2,65 +2,69 @@ import streamlit as st
 import pandas as pd
 import pdfplumber
 import io
-import re
 
 st.set_page_config(page_title="Stellantis PO Extractor", layout="wide")
-st.title("📄 Multi-PDF PO Extractor")
-st.write("Upload your Purchase Order PDFs (e.g., PO 62128188) to extract item details into Excel.")
+st.title("📄 Stellantis PO Extractor")
 
-# 1. File Uploader for multiple PDFs
-uploaded_files = st.file_uploader("Choose PO PDF files", type="pdf", accept_multiple_files=True)
+uploaded_files = st.file_uploader("Upload Stellantis PO PDFs", type="pdf", accept_multiple_files=True)
 
-def extract_po_data(pdf_file):
-    items_list = []
+def extract_stellantis_logic(pdf_file):
+    extracted_items = []
     with pdfplumber.open(pdf_file) as pdf:
         for page in pdf.pages:
-            tables = page.extract_tables()
-            for table in tables:
-                # Look for tables with the specific headers found in the PO
-                if any("Material" in str(cell) for cell in table[0]):
-                    for row in table[1:]:
-                        if len(row) >= 7 and row[0]: # Ensure it's an item row
-                            items_list.append({
-                                "PO Number": pdf_file.name.split(' ')[0], # Extracts ID from filename
-                                "Item": row[0],
-                                "Material": row[1].replace('\n', ' '),
-                                "Quantity": row[2],
-                                "UOM": row[3],
-                                "Unit Price": row[4].replace('\n', ''),
-                                "Effective Value": row[5],
-                                "Net Amount": row[6]
-                            })
-    return items_list
+            # Force table extraction using visual lines
+            table = page.extract_table({
+                "vertical_strategy": "lines",
+                "horizontal_strategy": "lines",
+                "snap_tolerance": 3,
+            })
+            
+            if not table:
+                # Fallback: Try extracting without strict lines (for borderless tables)
+                table = page.extract_table()
+
+            if table:
+                for row in table:
+                    # Filter for rows that look like Line Items (contain 'USD' or 'LO')
+                    # This matches Item 1 and Item 2 in your document [cite: 7, 49]
+                    if any("USD" in str(cell) for cell in row) and any("LO" in str(cell) for cell in row):
+                        # Clean up the row data
+                        clean_row = [str(c).replace('\n', ' ').strip() if c else "" for c in row]
+                        
+                        # Mapping based on your document's columns [cite: 7, 49]
+                        extracted_items.append({
+                            "Source File": pdf_file.name,
+                            "Item": clean_row[0],
+                            "Material": clean_row[1],
+                            "Quantity": clean_row[2],
+                            "UOM": clean_row[3],
+                            "Unit Price / Currency": clean_row[4],
+                            "Effective Value": clean_row[5],
+                            "Net Amount": clean_row[6]
+                        })
+    return extracted_items
 
 if uploaded_files:
-    all_data = []
-    for uploaded_file in uploaded_files:
-        with st.spinner(f"Processing {uploaded_file.name}..."):
-            file_data = extract_po_data(uploaded_file)
-            all_data.extend(file_data)
+    final_data = []
+    for file in uploaded_files:
+        data = extract_stellantis_logic(file)
+        final_data.extend(data)
     
-    if all_data:
-        df = pd.DataFrame(all_data)
-        st.success(f"Successfully extracted {len(df)} items from {len(uploaded_files)} files.")
-        
-        # Display Preview
-        st.subheader("Data Preview")
-        st.dataframe(df, use_container_width=True)
+    if final_data:
+        df = pd.DataFrame(final_data)
+        st.success(f"Extracted {len(df)} items!")
+        st.dataframe(df)
 
-        # 2. Excel Export Logic
+        # Download to Excel
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='Extracted_PO_Items')
+            df.to_excel(writer, index=False, sheet_name='PO_Data')
         
         st.download_button(
-            label="📥 Download Consolidated Excel",
+            label="📥 Download Excel",
             data=output.getvalue(),
-            file_name="Consolidated_PO_Report.xlsx",
+            file_name="Stellantis_PO_Export.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
     else:
-        st.error("No item data found. Please ensure the PDF format matches the Stellantis PO structure.")
-
-# Update Requirements for Streamlit Cloud
-# Add 'pdfplumber' to your requirements.txt file
+        st.error("Still no data found. The PDF might be a scanned image. Would you like to try OCR mode?")
