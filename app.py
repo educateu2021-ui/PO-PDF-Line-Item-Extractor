@@ -1,57 +1,66 @@
 import streamlit as st
 import pandas as pd
+import pdfplumber
 import io
+import re
 
-# App Title
-st.set_page_config(page_title="PO Data Extractor", layout="wide")
-st.title("📋 PO Item Extractor to Excel")
-st.write("Upload your Purchase Order data to generate a downloadable Excel file.")
+st.set_page_config(page_title="Stellantis PO Extractor", layout="wide")
+st.title("📄 Multi-PDF PO Extractor")
+st.write("Upload your Purchase Order PDFs (e.g., PO 62128188) to extract item details into Excel.")
 
-# 1. Data Input (Simulating the extraction from your specific PO)
-# In a full app, you would integrate an OCR tool here to read the PDF.
-data = [
-    {
-        "Item": 1,
-        "Material": "72 Resources for EEHD Service",
-        "Quantity": 1.000,
-        "UOM": "LO",
-        "Unit Price / Per / Currency": "986,878.04 / 1 / USD",
-        "Effective Value": "986,878.04 USD",
-        "Net Amount": "986,878.04 USD"
-    },
-    {
-        "Item": 2,
-        "Material": "Hardware cost",
-        "Quantity": 1.000,
-        "UOM": "LO",
-        "Unit Price / Per / Currency": "43,205.40 / 1 / USD",
-        "Effective Value": "43,205.40 USD",
-        "Net Amount": "43,205.40 USD"
-    }
-]
+# 1. File Uploader for multiple PDFs
+uploaded_files = st.file_uploader("Choose PO PDF files", type="pdf", accept_multiple_files=True)
 
-# 2. Display the Table in the App
-df = pd.DataFrame(data)
-st.subheader("Extracted PO Line Items")
-st.dataframe(df, use_container_width=True)
+def extract_po_data(pdf_file):
+    items_list = []
+    with pdfplumber.open(pdf_file) as pdf:
+        for page in pdf.pages:
+            tables = page.extract_tables()
+            for table in tables:
+                # Look for tables with the specific headers found in the PO
+                if any("Material" in str(cell) for cell in table[0]):
+                    for row in table[1:]:
+                        if len(row) >= 7 and row[0]: # Ensure it's an item row
+                            items_list.append({
+                                "PO Number": pdf_file.name.split(' ')[0], # Extracts ID from filename
+                                "Item": row[0],
+                                "Material": row[1].replace('\n', ' '),
+                                "Quantity": row[2],
+                                "UOM": row[3],
+                                "Unit Price": row[4].replace('\n', ''),
+                                "Effective Value": row[5],
+                                "Net Amount": row[6]
+                            })
+    return items_list
 
-# 3. Excel Export Logic
-def to_excel(df):
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        df.to_excel(writer, index=False, sheet_name='PO_Items')
-    return output.getvalue()
+if uploaded_files:
+    all_data = []
+    for uploaded_file in uploaded_files:
+        with st.spinner(f"Processing {uploaded_file.name}..."):
+            file_data = extract_po_data(uploaded_file)
+            all_data.extend(file_data)
+    
+    if all_data:
+        df = pd.DataFrame(all_data)
+        st.success(f"Successfully extracted {len(df)} items from {len(uploaded_files)} files.")
+        
+        # Display Preview
+        st.subheader("Data Preview")
+        st.dataframe(df, use_container_width=True)
 
-excel_data = to_excel(df)
+        # 2. Excel Export Logic
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            df.to_excel(writer, index=False, sheet_name='Extracted_PO_Items')
+        
+        st.download_button(
+            label="📥 Download Consolidated Excel",
+            data=output.getvalue(),
+            file_name="Consolidated_PO_Report.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.error("No item data found. Please ensure the PDF format matches the Stellantis PO structure.")
 
-# 4. Download Button
-st.download_button(
-    label="📥 Download as Excel",
-    data=excel_data,
-    file_name="PO_62128188_Items.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-# Metadata Sidebar
-st.sidebar.header("Document Metadata")
-st.sidebar.info(f"PO Number: 62128188\n\nBuyer: T5K\n\nVendor: SEGULA TECHNOLOGIES")
+# Update Requirements for Streamlit Cloud
+# Add 'pdfplumber' to your requirements.txt file
