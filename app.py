@@ -1,98 +1,68 @@
 import streamlit as st
-import pandas as pd
-import pdf2image
-import pytesseract
-import io
-import re
+import os
 import zipfile
-from PIL import Image
+import io
 
-# Set Page Config
-st.set_page_config(page_title="Stellantis PO AI Tool", layout="wide")
-st.title("📑 Stellantis PO AI Master Tool")
-
-def parse_po_text(text, filename):
-    """
-    Unified extraction logic for all Stellantis PO formats.
-    Handles noisy OCR artifacts like ']' or '|'.
-    """
-    extracted_data = []
-    # This pattern captures Item, Material, Quantity, UOM, and all Pricing fields
-    pattern = r"[\]\s|]*(?P<item>\d+)?\s+(?P<material>.*?)\s+(?P<qty>[\d,.]+)\s+(?P<uom>LO|EA|DAY|PC|AU|UN)\s+(?P<price>[\d,./\s]+)\s+(?P<eff_val>[\d,.]+)\s+USD\s+(?P<net_amt>[\d,.]+)\s+USD"
+def rename_logic(filename, prefix_to_remove, suffix_to_add):
+    # Split filename and extension
+    base_name, extension = os.path.splitext(filename)
     
-    # Pre-processing to clean Stellantis table artifacts
-    clean_text = text.replace('|', ' ').replace('_', ' ')
-    
-    # Process text page-by-page to ensure multi-page support
-    matches = re.finditer(pattern, clean_text)
-    for match in matches:
-        extracted_data.append({
-            "Source": filename,
-            "Item": match.group("item") if match.group("item") else "N/A",
-            "Material": match.group("material").strip(),
-            "Quantity": match.group("qty"),
-            "UOM": match.group("uom"),
-            "Unit Price": match.group("price").strip() + " USD",
-            "Effective Value": match.group("eff_val") + " USD",
-            "Net Amount": match.group("net_amt") + " USD"
-        })
-    return extracted_data
+    # Remove the specific prefix if it exists
+    if prefix_to_remove and base_name.startswith(prefix_to_remove):
+        new_name = base_name.replace(prefix_to_remove, "", 1)
+    else:
+        new_name = base_name
+        
+    # Add the descriptive suffix
+    new_name = f"{new_name}{suffix_to_add}{extension}"
+    return new_name
 
-# Tabs setup
-tab1, tab2, tab3 = st.tabs(["📄 PDF Scan (Multi-Page)", "🖼️ Bulk Image Scan", "📷 PDF to Image Converter"])
+st.set_page_config(page_title="Image Bulk Renamer", layout="centered")
+st.title("🖼️ Image Bulk Renamer")
+st.info("Remove brand prefixes and add standard viewpoints (e.g., exterior-right-front-three-quarter)")
 
-# --- TAB 1: PDF SCAN ---
+# Sidebar Configuration
+st.sidebar.header("Renaming Rules")
+prefix = st.sidebar.text_input("Prefix to remove (e.g., 'Ampere-')", value="Ampere-")
+suffix = st.sidebar.text_input("Suffix to add", value="-exterior-right-front-three-quarter")
+
+tab1, tab2 = st.tabs(["Bulk Upload", "Single Upload"])
+
+# --- TAB 1: BULK UPLOAD ---
 with tab1:
-    pdf_files = st.file_uploader("Upload Stellantis PDFs", type="pdf", accept_multiple_files=True, key="pdf_main")
-    if pdf_files:
-        all_pdf_items = []
-        for pdf in pdf_files:
-            with st.spinner(f"Converting and Scanning {pdf.name}..."):
-                # Convert all pages (solves the 2/4 page issue)
-                images = pdf2image.convert_from_bytes(pdf.read(), dpi=300)
-                for i, img in enumerate(images):
-                    page_text = pytesseract.image_to_string(img)
-                    all_pdf_items.extend(parse_po_text(page_text, f"{pdf.name} (Pg {i+1})"))
+    uploaded_files = st.file_uploader("Upload multiple images", accept_multiple_files=True)
+    
+    if uploaded_files:
+        st.write(f"Total files: {len(uploaded_files)}")
         
-        if all_pdf_items:
-            df_pdf = pd.DataFrame(all_pdf_items)
-            st.dataframe(df_pdf, use_container_width=True)
-            
-            # Excel export with XlsxWriter
-            try:
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_pdf.to_excel(writer, index=False)
-                st.download_button("📥 Download PDF Extraction", output.getvalue(), "PO_Full_Extract.xlsx")
-            except ModuleNotFoundError:
-                st.error("Error: 'xlsxwriter' not found. Ensure it is in your requirements.txt")
-
-# --- TAB 2: IMAGE SCAN ---
-with tab2:
-    img_files = st.file_uploader("Upload PO Images", type=["jpg", "png", "jpeg"], accept_multiple_files=True, key="img_main")
-    if img_files:
-        all_img_items = []
-        for img in img_files:
-            input_img = Image.open(img)
-            img_text = pytesseract.image_to_string(input_img)
-            all_img_items.extend(parse_po_text(img_text, img.name))
-        
-        if all_img_items:
-            df_img = pd.DataFrame(all_img_items)
-            st.dataframe(df_img, use_container_width=True)
-
-# --- TAB 3: CONVERTER ---
-with tab3:
-    st.header("PDF to Image Converter")
-    convert_pdf = st.file_uploader("Upload PDF to save as Images", type="pdf", key="pdf_conv")
-    if convert_pdf:
-        images = pdf2image.convert_from_bytes(convert_pdf.read(), dpi=300)
+        # Create a ZIP in memory for download
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
-            for i, img in enumerate(images):
-                st.image(img, caption=f"Page {i+1}", use_container_width=True)
-                img_byte_arr = io.BytesIO()
-                img.save(img_byte_arr, format='PNG')
-                zip_file.writestr(f"page_{i+1}.png", img_byte_arr.getvalue())
+            for uploaded_file in uploaded_files:
+                new_filename = rename_logic(uploaded_file.name, prefix, suffix)
+                
+                # Copy file content to zip with new name
+                zip_file.writestr(new_filename, uploaded_file.getvalue())
+                st.text(f"✅ {uploaded_file.name} ➡️ {new_filename}")
+
+        st.download_button(
+            label="Download Renamed Files (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="renamed_images.zip",
+            mime="application/zip"
+        )
+
+# --- TAB 2: SINGLE UPLOAD ---
+with tab2:
+    single_file = st.file_uploader("Upload a single image", key="single")
+    
+    if single_file:
+        new_name = rename_logic(single_file.name, prefix, suffix)
+        st.success(f"New Name: {new_name}")
         
-        st.download_button("📥 Download All Pages as ZIP", zip_buffer.getvalue(), f"{convert_pdf.name}_images.zip")
+        st.download_button(
+            label="Download Renamed Image",
+            data=single_file.getvalue(),
+            file_name=new_name,
+            mime="image/png"
+        )
